@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wiggle Folks</title>
+<style>
+  :root { --ink:#1b1b1b; --paper:#fbf8f1; --line:#ddd5c4; --muted:#8a8272; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 28px; padding: 24px 12px;
+    user-select: none; -webkit-user-select: none; touch-action: none;
+    cursor: grab; outline: none;
+  }
+  body.dragging { cursor: grabbing; }
+  .hint { text-align: center; color: var(--muted); font-size: 14px; line-height: 1.7; pointer-events: none; }
+  .hint b { color: var(--ink); font-weight: 600; }
+  .row { width: 100%; max-width: 1500px; display: grid; grid-template-columns: repeat(8, 1fr); gap: 0; }
+  @media (max-width: 760px) { .row { grid-template-columns: repeat(4, 1fr); row-gap: 16px; } }
+  .fig { width: 100%; height: auto; display: block; overflow: visible; }
+  .ground { fill: none; stroke: var(--line); stroke-width: 3; stroke-linecap: round; }
+  .ink path, .ink ellipse, .ink circle {
+    fill: none; stroke: var(--ink); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round;
+  }
+  .ink ellipse, .ink circle { fill: var(--paper); }
+  .ink .mouth { fill: var(--ink); stroke-width: 3; }
+  .ink .tk path { stroke-width: 3; }
+  .tk { opacity: 0; }
+  .ctl { display: flex; gap: 18px; align-items: center; }
+  label, button { font: inherit; font-size: 13px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  button { background: none; border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px; }
+  button:hover { color: var(--ink); border-color: var(--muted); }
+</style>
+</head>
+<body tabindex="0">
+  <div class="hint"><b>Press and drag</b> anywhere on the page: <b>left / right</b> = hip circles (the farther you drag, the bigger the circle) &nbsp; <b>up / down</b> = squat / stand (feet stay put, the head moves)<br>Let go and they wobble back · music plays while you hold the mouse down (turn your sound on)</div>
+  <div class="row" id="row"></div>
+  <div class="ctl">
+    <label><input type="checkbox" id="wave" checked> Wave delay (each figure follows the last)</label>
+    <button id="snd" type="button">🔊 Sound: on</button>
+  </div>
+
+<script>
+(function () {
+  const N = 8, RX = 140, RY = 150;     // drag distance (px) at which the motion reaches its maximum
+  const row = document.getElementById('row');
+  const waveBox = document.getElementById('wave');
+  const sndBtn = document.getElementById('snd');
+
+  const tpl = () => `
+  <svg class="fig" viewBox="50 40 290 500" aria-hidden="true">
+    <path class="ground" d="M118 526H300"/>
+    <g class="ink">
+      <path class="legL"/><path class="legR"/>
+      <ellipse class="footL" rx="12" ry="6"/><ellipse class="footR" rx="12" ry="6"/>
+      <path class="shirt"/><path class="collar"/>
+      <path class="armL"/><path class="armR"/>
+      <ellipse class="handL" rx="8" ry="6.5"/><ellipse class="handR" rx="8" ry="6.5"/>
+      <g class="tk tkHL"><path d="M0 -12Q6 0 0 12"/><path d="M10 -8Q15 0 10 8"/></g>
+      <g class="tk tkHR"><path d="M0 -12Q6 0 0 12"/><path d="M10 -8Q15 0 10 8"/></g>
+      <g class="tk tkS"><path d="M0 0L2 16"/><path d="M9 0L11 16"/></g>
+      <g class="tk tkKL"><path d="M0 -10L8 10"/><path d="M9 -10L17 10"/></g>
+      <g class="tk tkKR"><path d="M0 -10L8 10"/><path d="M9 -10L17 10"/></g>
+      <g class="head">
+        <circle cx="190" cy="130" r="75"/>
+        <path d="M155 142V154M225 142V154"/>
+        <path class="mouth" d="M174 166Q190 172 206 164Q204 188 190 189Q177 187 174 166Z"/>
+      </g>
+    </g>
+  </svg>`;
+
+  const figs = [];
+  const amps = [1, .94, 1.04, .92, 1.06, .96, 1.02, .9];
+  for (let i = 0; i < N; i++) {
+    const d = document.createElement('div');
+    d.innerHTML = tpl();
+    row.appendChild(d);
+    const s = d.firstElementChild;
+    const q = c => s.querySelector('.' + c);
+    figs.push({
+      el: {
+        head: q('head'), legL: q('legL'), legR: q('legR'), footL: q('footL'), footR: q('footR'),
+        shirt: q('shirt'), collar: q('collar'), armL: q('armL'), armR: q('armR'),
+        handL: q('handL'), handR: q('handR'),
+        tkHL: q('tkHL'), tkHR: q('tkHR'), tkS: q('tkS'), tkKL: q('tkKL'), tkKR: q('tkKR')
+      },
+      x: 0, z: 0, y: 0, vx: 0, vz: 0, vy: 0,
+      w: 13 + ((i * 7) % 5) * 0.8,
+      amp: amps[i], delay: i * 0.04
+    });
+  }
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const P = (x, y) => x.toFixed(1) + ' ' + y.toFixed(1);
+
+  // X: 胯左右（-1..1）  Z: 前后（与 X 相差 90°，合起来就是转圈）  Y: 蹲(+) / 起(-)
+  function pose(f) {
+    const e = f.el, X = f.x, Z = f.z, Y = f.y, ax = Math.abs(X);
+    const d = Y > 0 ? Y * 85 : Y * 6;         // how far the hips and upper body sink (feet never move)
+
+    // 头：扭腰时头顶不动，只绕头顶歪一下；蹲起时整个头跟着上下
+    e.head.setAttribute('transform', `translate(0 ${d.toFixed(1)}) rotate(${(-X * 7).toFixed(2)} 190 55)`);
+
+    // 上半身 / 腰：胯画圆，肩膀反相位画圆 → 转圈的感觉
+    const sh = -X * 12 + Z * 6;
+    const hp = X * 50;
+    const fw = clamp(1 - 0.12 * ax + 0.1 * Z, 0.75, 1.2);
+    const th = X * 0.2 + Z * 0.08;
+    const hv = [60 * fw, -9];
+    const rx = hv[0] * Math.cos(th) - hv[1] * Math.sin(th);
+    const ry = hv[0] * Math.sin(th) + hv[1] * Math.cos(th);
+    const HC = [205 + hp, 347 + d + Z * 8];
+    const hl = [HC[0] - rx, HC[1] - ry], hr = [HC[0] + rx, HC[1] + ry];
+    const sw = 34 * (1 - 0.12 * ax);
+    const TLx = 194 + sh - sw, TRx = 194 + sh + sw;
+    const onHead = x => 130 + d + Math.sqrt(75 * 75 - (x - 190) * (x - 190));
+    const TL = [TLx, onHead(TLx)], TR = [TRx, onHead(TRx)];
+    const mr = [(TR[0] + hr[0]) / 2 + 4, (TR[1] + hr[1]) / 2];
+    const ml = [(TL[0] + hl[0]) / 2 - 4, (TL[1] + hl[1]) / 2];
+    e.shirt.setAttribute('d',
+      `M${P(...TR)}Q${P(...mr)} ${P(...hr)}Q${P(HC[0], HC[1] + 10)} ${P(...hl)}Q${P(...ml)} ${P(...TL)}`);
+    const cs = (TL[0] + TR[0]) / 2, cy = (TL[1] + TR[1]) / 2;
+    e.collar.setAttribute('d', `M${P(cs - 12, cy + 5)}Q${P(cs, cy + 23)} ${P(cs + 12, cy + 5)}`);
+
+    // 手臂：与胯反向甩；上拖时举手
+    const lift = Y < 0 ? Y * 36 : 0;
+    const EL = [TL[0] - 60 - X * 12 + Z * 8, TL[1] + 40 + lift * 0.5], HL = [TL[0] - 25 - X * 24 + Z * 10, TL[1] + 79 + lift - ax * 6];
+    const ER = [TR[0] + 68 - X * 12 + Z * 8, TR[1] + 64 + lift * 0.5], HR = [TR[0] + 53 - X * 24 + Z * 10, TR[1] + 115 + lift - ax * 6];
+    e.armL.setAttribute('d', `M${P(...TL)}L${P(...EL)}L${P(...HL)}`);
+    e.armR.setAttribute('d', `M${P(...TR)}L${P(...ER)}L${P(...HR)}`);
+    e.handL.setAttribute('cx', HL[0]); e.handL.setAttribute('cy', HL[1] + 3);
+    e.handR.setAttribute('cx', HR[0]); e.handR.setAttribute('cy', HR[1] + 3);
+
+    // 腿：脚底固定；腿长不变，胯下沉 / 摆动时膝盖自然向外弯
+    const FL = [172, 516], FR = [246, 516], FY = 511, LEG = 161 - Math.max(Y, 0) * 40;
+    const hipL = [HC[0] - 0.55 * rx, HC[1] - 0.55 * ry + 5];
+    const hipR = [HC[0] + 0.55 * rx, HC[1] + 0.55 * ry + 5];
+    const leg = (hip, fx, sgn) => {
+      const vx = fx - hip[0], vy = FY - hip[1], D = Math.hypot(vx, vy) || 1;
+      const off = Math.max(5, Math.sqrt(Math.max(0, (LEG / 2) ** 2 - (D / 2) ** 2)));
+      const mx = (hip[0] + fx) / 2, my = (hip[1] + FY) / 2;
+      const kx = mx + (-vy / D) * sgn * off, ky = my + (vx / D) * sgn * off;
+      return `M${P(...hip)}Q${P(2 * kx - mx, 2 * ky - my)} ${P(fx, FY)}`;
+    };
+    e.legL.setAttribute('d', leg(hipL, FL[0], 1));
+    e.legR.setAttribute('d', leg(hipR, FR[0], -1));
+    e.footL.setAttribute('cx', FL[0]); e.footL.setAttribute('cy', FL[1]);
+    e.footR.setAttribute('cx', FR[0]); e.footR.setAttribute('cy', FR[1]);
+    e.footL.setAttribute('transform', `rotate(${(-25 + X * 8).toFixed(1)} ${FL[0]} ${FL[1]})`);
+    e.footR.setAttribute('transform', `rotate(${(25 + X * 8).toFixed(1)} ${FR[0]} ${FR[1]})`);
+
+    // 动感线
+    const sx = f.vx >= 0 ? 1 : -1;
+    const op = clamp((Math.abs(f.vx) + 0.5 * Math.abs(f.vz) + 0.5 * Math.abs(f.vy)) * 0.22, 0, 1).toFixed(2);
+    const place = (g, x, y, s) => { g.setAttribute('transform', `translate(${x.toFixed(1)} ${y.toFixed(1)}) scale(${s} 1)`); g.style.opacity = op; };
+    place(e.tkHL, HL[0] + sx * 26, HL[1], sx);
+    place(e.tkHR, HR[0] + sx * 26, HR[1], sx);
+    place(e.tkS, (sx > 0 ? hr[0] + 8 : hl[0] - 20), HC[1] - 30, 1);
+    place(e.tkKL, (hipL[0] + FL[0]) / 2 - 40, (hipL[1] + FY) / 2, 1);
+    place(e.tkKR, (hipR[0] + FR[0]) / 2 + 24, (hipR[1] + FY) / 2, 1);
+  }
+
+  // ───────────── 声音（Web Audio 现场合成，原创搞笑小曲） ─────────────
+  const AC = window.AudioContext || window.webkitAudioContext;
+  let ac = null, master, musicGain, whistle, whistleGain, noiseBuf, timer = null;
+  let soundOn = true, playing = false, step = 0, nextT = 0;
+  const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+
+  function initAudio() {
+    if (!AC) return;
+    if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
+    try {
+      ac = new AC();
+      master = ac.createGain(); master.gain.value = soundOn ? 0.7 : 0;
+      const comp = ac.createDynamicsCompressor();
+      master.connect(comp); comp.connect(ac.destination);
+      musicGain = ac.createGain(); musicGain.gain.value = 0; musicGain.connect(master);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate * 0.5, ac.sampleRate);
+      const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+      // 滑哨：音高跟着蹲起走
+      whistle = ac.createOscillator(); whistle.type = 'sine'; whistle.frequency.value = 600;
+      whistleGain = ac.createGain(); whistleGain.gain.value = 0;
+      const vib = ac.createOscillator(), vg = ac.createGain(); vib.frequency.value = 7; vg.gain.value = 14;
+      vib.connect(vg); vg.connect(whistle.frequency);
+      whistle.connect(whistleGain); whistleGain.connect(master);
+      whistle.start(); vib.start();
+    } catch (_) { ac = null; }
+  }
+
+  function envGain(t, a, dcy, vol, dest) {
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + a + dcy);
+    g.connect(dest); return g;
+  }
+  function bass(m, t) {
+    const o = ac.createOscillator(); o.type = 'triangle'; o.frequency.value = mtof(m);
+    o.connect(envGain(t, 0.005, 0.24, 0.5, musicGain)); o.start(t); o.stop(t + 0.3);
+  }
+  function stab(ms, t) {
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1800;
+    lp.connect(envGain(t, 0.003, 0.1, 0.07, musicGain));
+    ms.forEach(m => { const o = ac.createOscillator(); o.type = 'square'; o.frequency.value = mtof(m); o.connect(lp); o.start(t); o.stop(t + 0.14); });
+  }
+  function kazoo(m, t, dur) {
+    const f = mtof(m), o = ac.createOscillator(); o.type = 'sawtooth';
+    o.frequency.setValueAtTime(f * 0.93, t); o.frequency.exponentialRampToValueAtTime(f, t + 0.05);
+    const lfo = ac.createOscillator(), lg = ac.createGain(); lfo.frequency.value = 6; lg.gain.value = 18;
+    lfo.connect(lg); lg.connect(o.detune);
+    const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1300; bp.Q.value = 1.4;
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.16, t + 0.02);
+    g.gain.setValueAtTime(0.16, t + dur * 0.75);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(bp); bp.connect(g); g.connect(musicGain);
+    o.start(t); lfo.start(t); o.stop(t + dur + 0.02); lfo.stop(t + dur + 0.02);
+  }
+  function kick(t) {
+    const o = ac.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+    o.connect(envGain(t, 0.003, 0.2, 0.8, musicGain)); o.start(t); o.stop(t + 0.25);
+  }
+  function noiseHit(t, freq, type, vol, dcy) {
+    const s = ac.createBufferSource(); s.buffer = noiseBuf;
+    const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = 1;
+    s.connect(f); f.connect(envGain(t, 0.002, dcy, vol, musicGain)); s.start(t); s.stop(t + dcy + 0.05);
+  }
+  const BASS = [[48, 43], [43, 50], [48, 43], [41, 43]];
+  const STAB = [[[60, 64, 67], [60, 64, 67]], [[59, 62, 67], [59, 62, 67]], [[60, 64, 67], [60, 64, 67]], [[57, 60, 65], [59, 62, 67]]];
+  const MEL = [
+    [0, 76, 1], [1, 79, 1], [2, 76, 1], [3, 72, 1], [4, 74, 2], [6, 67, 1],
+    [8, 71, 1], [9, 74, 1], [10, 71, 1], [11, 67, 1], [12, 69, 2], [14, 72, 1],
+    [16, 76, 1], [17, 79, 1], [18, 84, 1], [19, 79, 1], [20, 76, 2], [22, 72, 1],
+    [24, 77, 1], [25, 76, 1], [26, 74, 1], [27, 71, 1], [28, 72, 3]
+  ];
+  function playStep(s, t, spb) {
+    const bar = (s / 8) | 0, k = s % 8;
+    if (k === 0) { bass(BASS[bar][0], t); kick(t); }
+    if (k === 4) { bass(BASS[bar][1], t); kick(t); }
+    if (k === 2 || k === 6) { stab(STAB[bar][k === 2 ? 0 : 1], t); noiseHit(t, 1900, 'bandpass', 0.22, 0.07); }
+    if (k % 2 === 1) noiseHit(t, 7000, 'highpass', 0.07, 0.03);
+    for (const n of MEL) if (n[0] === s) kazoo(n[1], t, n[2] * spb * 0.95);
+  }
+  const drag = { on: false, sx: 0, sy: 0, dx: 0, dy: 0, th: 0, r: 0, peak: 0 };
+  function sched() {
+    if (!playing || !ac) return;
+    const bpm = 128 + 52 * drag.r, spb = 60 / bpm / 2;
+    while (nextT < ac.currentTime + 0.15) { playStep(step % 32, nextT, spb); step++; nextT += spb; }
+  }
+  function musicStart() {
+    initAudio(); if (!ac || playing) return;
+    playing = true; step = 0; nextT = ac.currentTime + 0.05;
+    musicGain.gain.cancelScheduledValues(ac.currentTime);
+    musicGain.gain.setTargetAtTime(1, ac.currentTime, 0.02);
+    timer = setInterval(sched, 25); sched();
+  }
+  function musicStop() {
+    if (!ac || !playing) return;
+    playing = false; clearInterval(timer);
+    musicGain.gain.setTargetAtTime(0, ac.currentTime, 0.12);
+  }
+  function boing(v) {
+    if (!ac) return; const t = ac.currentTime;
+    const o = ac.createOscillator(), l = ac.createOscillator(), lg = ac.createGain(), g = ac.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(170, t); o.frequency.exponentialRampToValueAtTime(420, t + 0.5);
+    l.frequency.value = 20; lg.gain.setValueAtTime(150, t); lg.gain.exponentialRampToValueAtTime(1, t + 0.6);
+    l.connect(lg); lg.connect(o.frequency); o.connect(g); g.connect(master);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.4 * v, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
+    o.start(t); l.start(t); o.stop(t + 0.75); l.stop(t + 0.75);
+  }
+  function whistleUpdate(f) {
+    if (!ac || !whistle) return; const t = ac.currentTime;
+    whistleGain.gain.setTargetAtTime(clamp(Math.abs(f.vy) * 0.03, 0, 0.07), t, 0.03);
+    whistle.frequency.setTargetAtTime(clamp(1000 - f.y * 650, 300, 1500), t, 0.03);
+  }
+  sndBtn.addEventListener('click', () => {
+    soundOn = !soundOn;
+    sndBtn.textContent = soundOn ? '🔊 Sound: on' : '🔇 Sound: off';
+    initAudio(); if (master) master.gain.setTargetAtTime(soundOn ? 0.7 : 0, ac.currentTime, 0.03);
+  });
+
+  // ───────────── 输入 ─────────────
+  window.addEventListener('pointerdown', e => {
+    if (e.target.closest && e.target.closest('label, button')) return;
+    drag.on = true; drag.sx = e.clientX; drag.sy = e.clientY; drag.dx = 0; drag.dy = 0; drag.th = 0; drag.peak = 0;
+    document.body.classList.add('dragging');
+    document.body.focus({ preventScroll: true });
+    try { document.documentElement.setPointerCapture(e.pointerId); } catch (_) {}
+    musicStart();
+    e.preventDefault();
+  });
+  window.addEventListener('pointermove', e => {
+    if (!drag.on) return;
+    drag.dx = e.clientX - drag.sx; drag.dy = e.clientY - drag.sy;
+  });
+  const end = () => {
+    if (!drag.on) return;
+    drag.on = false; drag.dx = 0; drag.dy = 0;
+    document.body.classList.remove('dragging');
+    musicStop();
+    if (drag.peak > 0.15) boing(clamp(drag.peak, 0.3, 1));
+  };
+  window.addEventListener('pointerup', e => { initAudio(); end(); });
+  window.addEventListener('pointercancel', end);
+  window.addEventListener('blur', end);
+
+  // ───────────── 弹簧动画 ─────────────
+  const hist = [];
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000); last = now;
+
+    // 目标：左右拖动 → 胯绕圈（半径 = 拖动距离，方向 = 拖动方向）；上下拖动 → 蹲起
+    let tx = 0, tz = 0, ty = 0;
+    if (drag.on) {
+      const rx = clamp((Math.abs(drag.dx) - 6) / RX, 0, 1), s = drag.dx >= 0 ? 1 : -1;
+      drag.th += dt * (7 + 5 * rx);
+      tx = s * rx * Math.cos(drag.th); tz = rx * Math.sin(drag.th);
+      ty = clamp(drag.dy / RY, -1, 1);
+      drag.r = Math.max(rx, Math.abs(ty));
+      drag.peak = Math.max(drag.peak, drag.r);
+    } else drag.r = 0;
+
+    hist.push({ t: now, x: tx, z: tz, y: ty });
+    while (hist.length > 60) hist.shift();
+    const wave = waveBox.checked;
+    for (const f of figs) {
+      let T = hist[hist.length - 1];
+      if (wave) {
+        const want = now - f.delay * 1000; T = { x: 0, z: 0, y: 0 };
+        for (let j = hist.length - 1; j >= 0; j--) { if (hist[j].t <= want) { T = hist[j]; break; } }
+      }
+      const w = f.w, zt = 0.26, steps = 2, h = dt / steps;
+      for (let s = 0; s < steps; s++) {
+        f.vx += (w * w * (T.x * f.amp - f.x) - 2 * zt * w * f.vx) * h; f.x += f.vx * h;
+        f.vz += (w * w * (T.z * f.amp - f.z) - 2 * zt * w * f.vz) * h; f.z += f.vz * h;
+        f.vy += (w * w * (T.y * f.amp - f.y) - 2 * zt * w * f.vy) * h; f.y += f.vy * h;
+      }
+      const moving = Math.abs(f.vx) + Math.abs(f.vz) + Math.abs(f.vy) + Math.abs(f.x - T.x) + Math.abs(f.z - T.z) + Math.abs(f.y - T.y);
+      if (moving > 0.001 || f.dirty) { pose(f); f.dirty = moving > 0.001; }
+    }
+    whistleUpdate(figs[0]);
+    requestAnimationFrame(frame);
+  }
+  figs.forEach(pose);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
